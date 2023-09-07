@@ -1,0 +1,36 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 0 * * *"
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v4
+        with:
+          go-version: 'stable'
+
+      - id: build
+        run: go run -v .
+
+      - if: steps.build.outputs.skip != 'true'
+        run: |
+          sha256sum geoip.db > dist/geoip.db.sha256sum
+          sha256sum geoip-cn.db > dist/geoip-cn.db.sha256sum
+
+      - if: steps.build.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          name: ${{ steps.build.outputs.tag }}
+          tag_name: ${{ steps.build.outputs.tag }}
+          files: |
+            geoip.db
+            geoip-cn.db
+            geoip.db.sha256sum
+            geoip-cn.db.sha256sum
