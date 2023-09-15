@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -37,7 +38,10 @@ func init() {
 }
 
 func setActionOutput(name string, content string) {
-	os.Stdout.WriteString("::set-output name=" + name + "::" + content + "\n")
+	outputPath, exists := os.LookupEnv("GITHUB_OUTPUT")
+	if exists {
+		os.WriteFile(outputPath, []byte(name+"="+content+"\n"), fs.ModeAppend)
+	}
 }
 
 func getLatestRelease(from string) (*github.RepositoryRelease, error) {
