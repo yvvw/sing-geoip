@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"net"
 	"net/http"
@@ -17,7 +19,6 @@ import (
 	"github.com/oschwald/maxminddb-golang"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
-	"github.com/sagernet/sing/common/rw"
 	"github.com/sirupsen/logrus"
 )
 
@@ -35,7 +36,11 @@ func init() {
 	githubClient = github.NewClient(transport.Client())
 }
 
-func fetch(from string) (*github.RepositoryRelease, error) {
+func setActionOutput(name string, content string) {
+	os.Stdout.WriteString("::set-output name=" + name + "::" + content + "\n")
+}
+
+func getLatestRelease(from string) (*github.RepositoryRelease, error) {
 	names := strings.SplitN(from, "/", 2)
 	latestRelease, _, err := githubClient.Repositories.GetLatestRelease(context.Background(), names[0], names[1])
 	if err != nil {
@@ -44,9 +49,9 @@ func fetch(from string) (*github.RepositoryRelease, error) {
 	return latestRelease, err
 }
 
-func get(downloadURL *string) ([]byte, error) {
-	logrus.Info("download ", *downloadURL)
-	response, err := http.Get(*downloadURL)
+func download(url *string) ([]byte, error) {
+	logrus.Info("download ", *url)
+	response, err := http.Get(*url)
 	if err != nil {
 		return nil, err
 	}
@@ -54,14 +59,32 @@ func get(downloadURL *string) ([]byte, error) {
 	return io.ReadAll(response.Body)
 }
 
-func download(release *github.RepositoryRelease) ([]byte, error) {
+func downloadGeoIp(release *github.RepositoryRelease, fileName string) ([]byte, error) {
 	geoipAsset := common.Find(release.Assets, func(it *github.ReleaseAsset) bool {
-		return *it.Name == "Country.mmdb"
+		return *it.Name == fileName
 	})
 	if geoipAsset == nil {
-		return nil, E.New("Country.mmdb not found in upstream release ", release.Name)
+		return nil, E.New(fileName+" not found in upstream release ", release.Name)
 	}
-	return get(geoipAsset.BrowserDownloadURL)
+	geoipChecksumAsset := common.Find(release.Assets, func(it *github.ReleaseAsset) bool {
+		return *it.Name == fileName+".sha256sum"
+	})
+	if geoipChecksumAsset == nil {
+		return nil, E.New(fileName+".sha256sum not found in upstream release ", release.Name)
+	}
+	data, err := download(geoipAsset.BrowserDownloadURL)
+	if err != nil {
+		return nil, err
+	}
+	remoteChecksum, err := download(geoipChecksumAsset.BrowserDownloadURL)
+	if err != nil {
+		return nil, err
+	}
+	checksum := sha256.Sum256(data)
+	if hex.EncodeToString(checksum[:]) != string(remoteChecksum[:64]) {
+		return nil, E.New("checksum mismatch")
+	}
+	return data, nil
 }
 
 func parse(binary []byte) (metadata maxminddb.Metadata, countryMap map[string][]*net.IPNet, err error) {
@@ -109,25 +132,7 @@ func newWriter(metadata maxminddb.Metadata, codes []string) (*mmdbwriter.Tree, e
 	})
 }
 
-func open(path string, codes []string) (*mmdbwriter.Tree, error) {
-	reader, err := maxminddb.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	if reader.Metadata.DatabaseType != "sing-geoip" {
-		return nil, E.New("invalid sing-geoip database")
-	}
-	reader.Close()
-
-	return mmdbwriter.Load(path, mmdbwriter.Options{
-		Languages: append(reader.Metadata.Languages, common.Filter(codes, func(it string) bool {
-			return !common.Contains(reader.Metadata.Languages, it)
-		})...),
-		Inserter: inserter.ReplaceWith,
-	})
-}
-
-func write(writer *mmdbwriter.Tree, dataMap map[string][]*net.IPNet, output string, codes []string) error {
+func writeData(writer *mmdbwriter.Tree, dataMap map[string][]*net.IPNet, output string, codes []string) error {
 	if len(codes) == 0 {
 		codes = make([]string, 0, len(dataMap))
 		for code := range dataMap {
@@ -159,8 +164,8 @@ func write(writer *mmdbwriter.Tree, dataMap map[string][]*net.IPNet, output stri
 	return err
 }
 
-func local(input string, output string, codes []string) error {
-	binary, err := os.ReadFile(input)
+func generateGeoIp(release *github.RepositoryRelease, inputFileName string, outputFileName string, outputCNFileName string) error {
+	binary, err := downloadGeoIp(release, inputFileName)
 	if err != nil {
 		return err
 	}
@@ -168,83 +173,61 @@ func local(input string, output string, codes []string) error {
 	if err != nil {
 		return err
 	}
-	var writer *mmdbwriter.Tree
-	if rw.FileExists(output) {
-		writer, err = open(output, codes)
-	} else {
-		writer, err = newWriter(metadata, codes)
+
+	codes := make([]string, 0, len(countryMap))
+	for code := range countryMap {
+		codes = append(codes, code)
 	}
+	writer, err := newWriter(metadata, codes)
 	if err != nil {
 		return err
 	}
-	return write(writer, countryMap, output, codes)
+	err = writeData(writer, countryMap, outputFileName, nil)
+	if err != nil {
+		return err
+	}
+
+	codes = []string{"cn"}
+	writer, err = newWriter(metadata, codes)
+	if err != nil {
+		return err
+	}
+	err = writeData(writer, countryMap, outputCNFileName, []string{"cn"})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func release(source string, destination string) error {
-	sourceRelease, err := fetch(source)
+func main() {
+	source := "soffchen/geoip"
+	input := "Country.mmdb"
+	output := "geoip.db"
+	outputCN := "geoip-cn.db"
+
+	destination := "yvvw/sing-geoip"
+
+	sourceRelease, err := getLatestRelease(source)
 	if err != nil {
-		return err
+		logrus.Fatal(err)
 	}
-	destinationRelease, err := fetch(destination)
+	destinationRelease, err := getLatestRelease(destination)
 	if err != nil {
 		logrus.Warn("missing destination latest release")
 	} else {
 		if os.Getenv("NO_SKIP") != "true" && strings.Contains(*destinationRelease.TagName, *sourceRelease.TagName) {
 			logrus.Info("already latest")
 			setActionOutput("skip", "true")
-			return nil
+			return
 		}
 	}
-	binary, err := download(sourceRelease)
+
+	err = generateGeoIp(sourceRelease, input, output, outputCN)
 	if err != nil {
-		return err
-	}
-	metadata, countryMap, err := parse(binary)
-	if err != nil {
-		return err
-	}
-	allCodes := make([]string, 0, len(countryMap))
-	for code := range countryMap {
-		allCodes = append(allCodes, code)
-	}
-	writer, err := newWriter(metadata, allCodes)
-	if err != nil {
-		return err
-	}
-	err = write(writer, countryMap, "geoip.db", nil)
-	if err != nil {
-		return err
-	}
-	writer, err = newWriter(metadata, []string{"cn"})
-	if err != nil {
-		return err
-	}
-	err = write(writer, countryMap, "geoip-cn.db", []string{"cn"})
-	if err != nil {
-		return err
-	}
-	if err != nil {
-		return err
+		logrus.Fatal(err)
 	}
 
 	tagName := *sourceRelease.TagName
 	setActionOutput("tag", tagName)
-
-	return nil
-}
-
-func setActionOutput(name string, content string) {
-	os.Stdout.WriteString("::set-output name=" + name + "::" + content + "\n")
-}
-
-func main() {
-	var err error
-	if len(os.Args) >= 3 {
-		err = local(os.Args[1], os.Args[2], os.Args[2:])
-	} else {
-		err = release("soffchen/geoip", "yvvw/sing-geoip")
-	}
-	if err != nil {
-		logrus.Fatal(err)
-	}
 }
