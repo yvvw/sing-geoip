@@ -37,5 +37,6 @@ jobs:
           files: |
             geoip.db
             geoip.db.sha256sum
+            geoip.txt
             geoip-cn.db
             geoip-cn.db.sha256sum

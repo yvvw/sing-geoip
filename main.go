@@ -168,25 +168,48 @@ func writeData(writer *mmdbwriter.Tree, dataMap map[string][]*net.IPNet, output 
 	return err
 }
 
+func generateIPList(ipMap map[string][]*net.IPNet, outputFileName string) error {
+	outputFile, err := os.Create(outputFileName)
+	if err != nil {
+		return err
+	}
+	defer outputFile.Close()
+
+	var list []string
+	for key := range ipMap {
+		list = append(list, key)
+	}
+	sort.Strings(list)
+
+	_, err = outputFile.WriteString(strings.Join(list, "\n"))
+
+	return err
+}
+
 func generateGeoIp(release *github.RepositoryRelease, inputFileName string, outputFileName string, outputCNFileName string) error {
 	binary, err := downloadGeoIp(release, inputFileName)
 	if err != nil {
 		return err
 	}
-	metadata, countryMap, err := parse(binary)
+	metadata, ipMap, err := parse(binary)
 	if err != nil {
 		return err
 	}
 
-	codes := make([]string, 0, len(countryMap))
-	for code := range countryMap {
+	err = generateIPList(ipMap, strings.Split(outputFileName, ".")[0]+".txt")
+	if err != nil {
+		return err
+	}
+
+	codes := make([]string, 0, len(ipMap))
+	for code := range ipMap {
 		codes = append(codes, code)
 	}
 	writer, err := newWriter(metadata, codes)
 	if err != nil {
 		return err
 	}
-	err = writeData(writer, countryMap, outputFileName, nil)
+	err = writeData(writer, ipMap, outputFileName, nil)
 	if err != nil {
 		return err
 	}
@@ -196,7 +219,7 @@ func generateGeoIp(release *github.RepositoryRelease, inputFileName string, outp
 	if err != nil {
 		return err
 	}
-	err = writeData(writer, countryMap, outputCNFileName, []string{"cn"})
+	err = writeData(writer, ipMap, outputCNFileName, []string{"cn"})
 	if err != nil {
 		return err
 	}
