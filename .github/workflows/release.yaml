@@ -40,3 +40,11 @@ jobs:
             geoip.txt
             geoip-cn.db
             geoip-cn.db.sha256sum
+
+      - name: Prune Release
+        if: steps.build.outputs.skip != 'true'
+        uses: dev-drprasad/delete-older-releases@v0.3.2
+        with:
+          keep_latest: 5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
