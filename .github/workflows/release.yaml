@@ -22,6 +22,20 @@ jobs:
         id: build
         run: go run -v .
 
+      - name: Release RuleSet
+        if: steps.build.outputs.skip != 'true'
+        run: |
+          set -e -o pipefail
+          cd rule-set
+          git init
+          git config --local user.email "github-action@users.noreply.github.com"
+          git config --local user.name "GitHub Action"
+          git remote add origin https://github-action:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git branch -M rule-set
+          git add .
+          git commit -m "update"
+          git push -f origin rule-set
+
       - name: Checksum
         if: steps.build.outputs.skip != 'true'
         run: |

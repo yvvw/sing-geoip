@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -18,8 +19,11 @@ import (
 	"github.com/maxmind/mmdbwriter/mmdbtype"
 	"github.com/oschwald/geoip2-golang"
 	"github.com/oschwald/maxminddb-golang"
+	"github.com/sagernet/sing-box/common/srs"
+	"github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
-	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/exceptions"
 	"github.com/sirupsen/logrus"
 )
 
@@ -40,7 +44,7 @@ func init() {
 func setActionOutput(name string, content string) {
 	outputPath, exists := os.LookupEnv("GITHUB_OUTPUT")
 	if exists {
-		os.WriteFile(outputPath, []byte(name+"="+content+"\n"), fs.ModeAppend)
+		_ = os.WriteFile(outputPath, []byte(name+"="+content+"\n"), fs.ModeAppend)
 	}
 }
 
@@ -68,13 +72,13 @@ func downloadGeoIp(release *github.RepositoryRelease, fileName string) ([]byte, 
 		return *it.Name == fileName
 	})
 	if geoipAsset == nil {
-		return nil, E.New(fileName+" not found in upstream release ", release.Name)
+		return nil, exceptions.New(fileName+" not found in upstream release ", release.Name)
 	}
 	geoipChecksumAsset := common.Find(release.Assets, func(it *github.ReleaseAsset) bool {
 		return *it.Name == fileName+".sha256sum"
 	})
 	if geoipChecksumAsset == nil {
-		return nil, E.New(fileName+".sha256sum not found in upstream release ", release.Name)
+		return nil, exceptions.New(fileName+".sha256sum not found in upstream release ", release.Name)
 	}
 	data, err := download(geoipAsset.BrowserDownloadURL)
 	if err != nil {
@@ -86,7 +90,7 @@ func downloadGeoIp(release *github.RepositoryRelease, fileName string) ([]byte, 
 	}
 	checksum := sha256.Sum256(data)
 	if hex.EncodeToString(checksum[:]) != string(remoteChecksum[:64]) {
-		return nil, E.New("checksum mismatch")
+		return nil, exceptions.New("checksum mismatch")
 	}
 	return data, nil
 }
@@ -186,7 +190,7 @@ func generateIPList(ipMap map[string][]*net.IPNet, outputFileName string) error 
 	return err
 }
 
-func generateGeoIp(release *github.RepositoryRelease, inputFileName string, outputFileName string, outputCNFileName string) error {
+func generateGeoIp(release *github.RepositoryRelease, inputFileName string, outputFileName string, outputCNFileName string, ruleSetDir string) error {
 	binary, err := downloadGeoIp(release, inputFileName)
 	if err != nil {
 		return err
@@ -194,6 +198,40 @@ func generateGeoIp(release *github.RepositoryRelease, inputFileName string, outp
 	metadata, ipMap, err := parse(binary)
 	if err != nil {
 		return err
+	}
+
+	if ruleSetDir != "" {
+		_ = os.RemoveAll(ruleSetDir)
+		err = os.MkdirAll(ruleSetDir, 0o755)
+		if err != nil {
+			return err
+		}
+
+		for countryCode, ipNets := range ipMap {
+			var headlessRule option.DefaultHeadlessRule
+			headlessRule.IPCIDR = make([]string, 0, len(ipNets))
+			for _, cidr := range ipNets {
+				headlessRule.IPCIDR = append(headlessRule.IPCIDR, cidr.String())
+			}
+			var plainRuleSet option.PlainRuleSet
+			plainRuleSet.Rules = []option.HeadlessRule{
+				{
+					Type:           constant.RuleTypeDefault,
+					DefaultOptions: headlessRule,
+				},
+			}
+			srsPath, _ := filepath.Abs(filepath.Join(ruleSetDir, "geoip-"+countryCode+".srs"))
+			outputRuleSet, err := os.Create(srsPath)
+			if err != nil {
+				return err
+			}
+			err = srs.Write(outputRuleSet, plainRuleSet)
+			if err != nil {
+				_ = outputRuleSet.Close()
+				return err
+			}
+			_ = outputRuleSet.Close()
+		}
 	}
 
 	err = generateIPList(ipMap, strings.Split(outputFileName, ".")[0]+".txt")
@@ -250,7 +288,7 @@ func main() {
 		}
 	}
 
-	err = generateGeoIp(sourceRelease, input, output, outputCN)
+	err = generateGeoIp(sourceRelease, input, output, outputCN, "rule-set")
 	if err != nil {
 		logrus.Fatal(err)
 	}
